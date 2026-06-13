@@ -760,19 +760,30 @@ def compute_indicators(data):
 
 @st.cache_data(ttl=600)
 def get_fundamentals(ticker):
-    """Fetch fundamental data for a stock with retries and fallback."""
+    """Fetch fundamental data for a stock with retries, impersonation, and fallback."""
     import time
 
-    # Try .info with retries (Yahoo's info endpoint can be flaky/rate-limited)
+    # Attempt 1 & 2: .info with a browser-impersonating session (helps bypass cloud IP blocks)
     for attempt in range(2):
         try:
-            ticker_obj = yf.Ticker(ticker)
+            session = None
+            try:
+                from curl_cffi import requests as cf_requests
+                session = cf_requests.Session(impersonate="chrome")
+            except Exception:
+                session = None
+
+            if session:
+                ticker_obj = yf.Ticker(ticker, session=session)
+            else:
+                ticker_obj = yf.Ticker(ticker)
+
             info = ticker_obj.info
             if info and len(info) > 5:
                 return info
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(0.7)
 
     # Fallback: build a minimal info dict from fast_info (lighter endpoint)
     try:
@@ -783,7 +794,6 @@ def get_fundamentals(ticker):
             mcap = getattr(fi, "market_cap", None)
             if mcap:
                 fallback["marketCap"] = mcap
-            shares = getattr(fi, "shares", None)
 
             last_price = getattr(fi, "last_price", None)
             year_high = getattr(fi, "year_high", None)
@@ -798,6 +808,10 @@ def get_fundamentals(ticker):
             pe = getattr(fi, "trailing_pe", None)
             if pe:
                 fallback["trailingPE"] = pe
+
+            shares = getattr(fi, "shares", None)
+            if shares and last_price:
+                fallback["sharesOutstanding"] = shares
 
             if len(fallback) >= 2:
                 return fallback
@@ -1575,8 +1589,13 @@ if stock:
             if fund_info is None:
                 with st.spinner("Loading fundamentals..."):
                     fund_info = _get_fund(ticker)
+
             if fund_info:
-                st.markdown(f"**{company_name}** — Fundamental Analysis")
+                st.markdown(f"**{company_name}** — Fundamental Snapshot")
+
+                # Check if we have the rich dataset (full .info) or the lean fast_info fallback
+                has_rich_data = "trailingEps" in fund_info or "returnOnEquity" in fund_info or "totalRevenue" in fund_info
+
                 f1, f2, f3 = st.columns(3)
 
                 with f1:
@@ -1587,28 +1606,43 @@ if stock:
                     mcap = fund_info.get("marketCap", 0)
                     mcap_str = f"₹{mcap/1e7:.0f} Cr" if mcap else "N/A"
                     ev_ebitda = fund_info.get("enterpriseToEbitda", "N/A")
-                    st.markdown(f"| Metric | Value |\n|---|---|\n| Market Cap | {mcap_str} |\n| P/E (TTM) | {pe if pe == 'N/A' else f'{pe:.2f}'} |\n| Forward P/E | {fwd_pe if fwd_pe == 'N/A' else f'{fwd_pe:.2f}'} |\n| P/B Ratio | {pb if pb == 'N/A' else f'{pb:.2f}'} |\n| EV/EBITDA | {ev_ebitda if ev_ebitda == 'N/A' else f'{ev_ebitda:.2f}'} |")
+                    rows = f"| Metric | Value |\n|---|---|\n| Market Cap | {mcap_str} |\n| P/E (TTM) | {pe if pe == 'N/A' else f'{pe:.2f}'} |"
+                    if has_rich_data:
+                        rows += f"\n| Forward P/E | {fwd_pe if fwd_pe == 'N/A' else f'{fwd_pe:.2f}'} |\n| P/B Ratio | {pb if pb == 'N/A' else f'{pb:.2f}'} |\n| EV/EBITDA | {ev_ebitda if ev_ebitda == 'N/A' else f'{ev_ebitda:.2f}'} |"
+                    st.markdown(rows)
 
                 with f2:
-                    st.markdown("**Profitability**")
-                    roe = fund_info.get("returnOnEquity", "N/A")
-                    roa = fund_info.get("returnOnAssets", "N/A")
-                    margin = fund_info.get("profitMargins", "N/A")
-                    ops_margin = fund_info.get("operatingMargins", "N/A")
-                    eps = fund_info.get("trailingEps", "N/A")
-                    st.markdown(f"| Metric | Value |\n|---|---|\n| EPS | {eps if eps == 'N/A' else f'₹{eps:.2f}'} |\n| ROE | {roe if roe == 'N/A' else f'{roe*100:.2f}%'} |\n| ROA | {roa if roa == 'N/A' else f'{roa*100:.2f}%'} |\n| Profit Margin | {margin if margin == 'N/A' else f'{margin*100:.2f}%'} |\n| Operating Margin | {ops_margin if ops_margin == 'N/A' else f'{ops_margin*100:.2f}%'} |")
+                    st.markdown("**52-Week Range**")
+                    high_52 = fund_info.get("fiftyTwoWeekHigh", ind.get("week_52_high", "N/A"))
+                    low_52 = fund_info.get("fiftyTwoWeekLow", ind.get("week_52_low", "N/A"))
+                    curr_p = fund_info.get("currentPrice", ind.get("current_price", "N/A"))
+                    rows2 = f"| Metric | Value |\n|---|---|\n| Current Price | ₹{curr_p:.2f} |\n| 52W High | ₹{high_52:.2f} |\n| 52W Low | ₹{low_52:.2f} |"
+                    if has_rich_data:
+                        roe = fund_info.get("returnOnEquity", "N/A")
+                        eps = fund_info.get("trailingEps", "N/A")
+                        rows2 = f"| Metric | Value |\n|---|---|\n| EPS | {eps if eps == 'N/A' else f'₹{eps:.2f}'} |\n| ROE | {roe if roe == 'N/A' else f'{roe*100:.2f}%'} |\n| 52W High | ₹{high_52:.2f} |\n| 52W Low | ₹{low_52:.2f} |"
+                    st.markdown(rows2)
 
                 with f3:
-                    st.markdown("**Financial Health**")
-                    de = fund_info.get("debtToEquity", "N/A")
-                    cr = fund_info.get("currentRatio", "N/A")
-                    rev = fund_info.get("totalRevenue", 0)
-                    rev_str = f"₹{rev/1e7:.0f} Cr" if rev else "N/A"
-                    rev_growth = fund_info.get("revenueGrowth", "N/A")
-                    div_yield = fund_info.get("dividendYield", "N/A")
-                    st.markdown(f"| Metric | Value |\n|---|---|\n| Revenue | {rev_str} |\n| Revenue Growth | {rev_growth if rev_growth == 'N/A' else f'{rev_growth*100:.2f}%'} |\n| Debt/Equity | {de if de == 'N/A' else f'{de:.2f}'} |\n| Current Ratio | {cr if cr == 'N/A' else f'{cr:.2f}'} |\n| Dividend Yield | {div_yield if div_yield == 'N/A' else f'{div_yield*100:.2f}%'} |")
+                    if has_rich_data:
+                        st.markdown("**Financial Health**")
+                        de = fund_info.get("debtToEquity", "N/A")
+                        cr = fund_info.get("currentRatio", "N/A")
+                        rev = fund_info.get("totalRevenue", 0)
+                        rev_str = f"₹{rev/1e7:.0f} Cr" if rev else "N/A"
+                        rev_growth = fund_info.get("revenueGrowth", "N/A")
+                        div_yield = fund_info.get("dividendYield", "N/A")
+                        st.markdown(f"| Metric | Value |\n|---|---|\n| Revenue | {rev_str} |\n| Revenue Growth | {rev_growth if rev_growth == 'N/A' else f'{rev_growth*100:.2f}%'} |\n| Debt/Equity | {de if de == 'N/A' else f'{de:.2f}'} |\n| Current Ratio | {cr if cr == 'N/A' else f'{cr:.2f}'} |\n| Dividend Yield | {div_yield if div_yield == 'N/A' else f'{div_yield*100:.2f}%'} |")
+                    else:
+                        st.markdown("**Note**")
+                        st.markdown("""
+                        <div style="background: #111827; border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 0.8rem; font-size: 0.85rem; color: #94a3b8;">
+                        Detailed fundamentals (EPS, ROE, Revenue, Debt/Equity) are temporarily limited on this deployment due to Yahoo Finance API restrictions on cloud servers.<br><br>
+                        Market Cap, P/E, and price range are sourced from an alternate endpoint and remain accurate.
+                        </div>
+                        """, unsafe_allow_html=True)
             else:
-                st.warning("Fundamental data unavailable for this stock right now. Yahoo Finance's data endpoint may be temporarily rate-limited — try again in a minute, or pick a different stock.")
+                st.warning("Fundamental data unavailable for this stock right now. Try again in a minute, or pick a different stock.")
 
         with tab5:
             st.markdown("**Portfolio Tracker**")
