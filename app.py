@@ -760,15 +760,51 @@ def compute_indicators(data):
 
 @st.cache_data(ttl=600)
 def get_fundamentals(ticker):
-    """Fetch fundamental data for a stock."""
+    """Fetch fundamental data for a stock with retries and fallback."""
+    import time
+
+    # Try .info with retries (Yahoo's info endpoint can be flaky/rate-limited)
+    for attempt in range(2):
+        try:
+            ticker_obj = yf.Ticker(ticker)
+            info = ticker_obj.info
+            if info and len(info) > 5:
+                return info
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    # Fallback: build a minimal info dict from fast_info (lighter endpoint)
     try:
         ticker_obj = yf.Ticker(ticker)
-        info = ticker_obj.info
-        if not info or len(info) < 5:
-            return None
-        return info
+        fi = ticker_obj.fast_info
+        if fi:
+            fallback = {}
+            mcap = getattr(fi, "market_cap", None)
+            if mcap:
+                fallback["marketCap"] = mcap
+            shares = getattr(fi, "shares", None)
+
+            last_price = getattr(fi, "last_price", None)
+            year_high = getattr(fi, "year_high", None)
+            year_low = getattr(fi, "year_low", None)
+            if last_price:
+                fallback["currentPrice"] = last_price
+            if year_high:
+                fallback["fiftyTwoWeekHigh"] = year_high
+            if year_low:
+                fallback["fiftyTwoWeekLow"] = year_low
+
+            pe = getattr(fi, "trailing_pe", None)
+            if pe:
+                fallback["trailingPE"] = pe
+
+            if len(fallback) >= 2:
+                return fallback
     except Exception:
-        return None
+        pass
+
+    return None
 
 
 def compute_score(ind):
@@ -1572,7 +1608,7 @@ if stock:
                     div_yield = fund_info.get("dividendYield", "N/A")
                     st.markdown(f"| Metric | Value |\n|---|---|\n| Revenue | {rev_str} |\n| Revenue Growth | {rev_growth if rev_growth == 'N/A' else f'{rev_growth*100:.2f}%'} |\n| Debt/Equity | {de if de == 'N/A' else f'{de:.2f}'} |\n| Current Ratio | {cr if cr == 'N/A' else f'{cr:.2f}'} |\n| Dividend Yield | {div_yield if div_yield == 'N/A' else f'{div_yield*100:.2f}%'} |")
             else:
-                st.warning("Fundamental data unavailable for this stock.")
+                st.warning("Fundamental data unavailable for this stock right now. Yahoo Finance's data endpoint may be temporarily rate-limited — try again in a minute, or pick a different stock.")
 
         with tab5:
             st.markdown("**Portfolio Tracker**")
