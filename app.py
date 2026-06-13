@@ -760,19 +760,30 @@ def compute_indicators(data):
 
 @st.cache_data(ttl=600)
 def get_fundamentals(ticker):
-    """Fetch fundamental data for a stock with retries and fallback."""
+    """Fetch fundamental data for a stock with retries, impersonation, and fallback."""
     import time
 
-    # Try .info with retries (Yahoo's info endpoint can be flaky/rate-limited)
+    # Attempt 1 & 2: .info with a browser-impersonating session (helps bypass cloud IP blocks)
     for attempt in range(2):
         try:
-            ticker_obj = yf.Ticker(ticker)
+            session = None
+            try:
+                from curl_cffi import requests as cf_requests
+                session = cf_requests.Session(impersonate="chrome")
+            except Exception:
+                session = None
+
+            if session:
+                ticker_obj = yf.Ticker(ticker, session=session)
+            else:
+                ticker_obj = yf.Ticker(ticker)
+
             info = ticker_obj.info
             if info and len(info) > 5:
                 return info
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(0.7)
 
     # Fallback: build a minimal info dict from fast_info (lighter endpoint)
     try:
@@ -783,7 +794,6 @@ def get_fundamentals(ticker):
             mcap = getattr(fi, "market_cap", None)
             if mcap:
                 fallback["marketCap"] = mcap
-            shares = getattr(fi, "shares", None)
 
             last_price = getattr(fi, "last_price", None)
             year_high = getattr(fi, "year_high", None)
@@ -798,6 +808,10 @@ def get_fundamentals(ticker):
             pe = getattr(fi, "trailing_pe", None)
             if pe:
                 fallback["trailingPE"] = pe
+
+            shares = getattr(fi, "shares", None)
+            if shares and last_price:
+                fallback["sharesOutstanding"] = shares
 
             if len(fallback) >= 2:
                 return fallback
